@@ -3,6 +3,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import json
 import os
+import traceback
+import uuid
 from datetime import datetime
 
 app = FastAPI(title="QGIS Plugin API")
@@ -37,11 +39,21 @@ class ReprojectRequest(BaseModel):
 class JsonStorageService:
     @staticmethod
     def read_json(path, default_value):
-        if os.path.exists(path):
+        if not os.path.exists(path):
+            print(f"[Storage] File not found: {path}")
+            return default_value
+
+        try:
             with open(path, "r", encoding="utf-8") as file:
                 return json.load(file)
 
-        return default_value
+        except json.JSONDecodeError as error:
+            print(f"[Storage] JSON decode error in {path}: {error}")
+            return default_value
+
+        except Exception as error:
+            print(f"[Storage] Unexpected read error in {path}: {error}")
+            return default_value
 
     @staticmethod
     def write_json(path, data):
@@ -50,8 +62,14 @@ class JsonStorageService:
         if folder:
             os.makedirs(folder, exist_ok=True)
 
-        with open(path, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=4, ensure_ascii=False)
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(data, file, indent=4, ensure_ascii=False)
+
+        except Exception as error:
+            print(f"[Storage] Failed to write {path}: {error}")
+            traceback.print_exc()
+            raise
 
 
 # -----------------------------
@@ -199,6 +217,24 @@ def safe_file_name(value, fallback):
     )
 
 
+def error_response(where, error, status_code=500, request_id=None):
+    request_id = request_id or str(uuid.uuid4())
+
+    print(f"[ERROR] request_id={request_id} where={where}")
+    traceback.print_exc()
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "error",
+            "request_id": request_id,
+            "where": where,
+            "error_type": type(error).__name__,
+            "error_message": str(error)
+        }
+    )
+
+
 def build_log_entry(data: ReprojectRequest):
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -232,22 +268,37 @@ def root():
 # -----------------------------
 @app.post("/reproject")
 def receive_reproject(data: ReprojectRequest):
-    log_entry = build_log_entry(data)
+    request_id = str(uuid.uuid4())
 
-    log_index = log_service.append_log(log_entry)
-    log_service.save_extent_geojson(log_index, log_entry)
-    log_service.save_layer_geometry(
-        log_index,
-        log_entry,
-        data.layer_geojson_4326
-    )
+    try:
+        print(f"[POST /reproject] request_id={request_id} layer={data.layer_name}")
 
-    return {
-        "status": "success",
-        "message": "Log, extent GeoJSON ve layer geometry kaydedildi",
-        "log_index": log_index,
-        "data": log_entry
-    }
+        log_entry = build_log_entry(data)
+        log_entry["request_id"] = request_id
+
+        log_index = log_service.append_log(log_entry)
+        log_service.save_extent_geojson(log_index, log_entry)
+        log_service.save_layer_geometry(
+            log_index,
+            log_entry,
+            data.layer_geojson_4326
+        )
+
+        return {
+            "status": "success",
+            "request_id": request_id,
+            "message": "Log, extent GeoJSON ve layer geometry kaydedildi",
+            "log_index": log_index,
+            "data": log_entry
+        }
+
+    except Exception as error:
+        return error_response(
+            where="POST /reproject",
+            error=error,
+            status_code=500,
+            request_id=request_id
+        )
 
 
 # -----------------------------
